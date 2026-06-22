@@ -1,122 +1,406 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Apex Sessions — In session</title>
-<link rel="icon" href="data:," />
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/css/style.css" />
-</head>
-<body>
+// Apex Sessions — call page logic
+// This page is reached only by navigating from index.html (or a shared
+// link of the form /call.html?room=CODE&name=NAME). It owns the whole
+// in-call experience: joining, tiles, chat, and host controls.
 
-<div class="summit-glow" aria-hidden="true"></div>
+(() => {
+  const els = {
+    roomCodeChip: document.getElementById('room-code-chip'),
+    roomCodeText: document.getElementById('room-code-text'),
+    callTimer: document.getElementById('call-timer'),
+    videoGrid: document.getElementById('video-grid'),
 
-<main id="view-call" class="view view-call">
+    sidePanel: document.getElementById('side-panel'),
+    sidePanelClose: document.getElementById('side-panel-close'),
+    sideTabs: document.querySelectorAll('.side-tab'),
+    sideBodies: document.querySelectorAll('.side-panel-body'),
+    chatLog: document.getElementById('chat-log'),
+    chatForm: document.getElementById('chat-form'),
+    chatInput: document.getElementById('chat-input'),
+    peopleList: document.getElementById('people-list'),
+    peopleCount: document.getElementById('people-count'),
+    btnMuteAll: document.getElementById('btn-mute-all'),
 
-  <header class="call-topbar">
-    <div class="call-topbar-left">
-      <span class="brand-mark brand-mark-sm" aria-hidden="true"></span>
-      <div class="room-meta">
-        <span class="room-label">Apex Sessions</span>
-        <button id="room-code-chip" class="room-code-chip" title="Copy session code">
-          <span id="room-code-text">—</span>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-        </button>
-      </div>
-    </div>
-    <div class="call-topbar-right">
-      <span id="call-timer" class="call-timer">00:00</span>
-    </div>
-  </header>
+    ctlMic: document.getElementById('ctl-mic'),
+    ctlCam: document.getElementById('ctl-cam'),
+    ctlScreen: document.getElementById('ctl-screen'),
+    ctlChat: document.getElementById('ctl-chat'),
+    ctlPeople: document.getElementById('ctl-people'),
+    ctlLeave: document.getElementById('ctl-leave'),
 
-  <section class="stage" aria-label="Video grid">
-    <div id="video-grid" class="video-grid"></div>
-  </section>
+    toast: document.getElementById('toast'),
+    tileTemplate: document.getElementById('tile-template'),
+  };
 
-  <aside id="side-panel" class="side-panel" hidden>
-    <div class="side-panel-tabs">
-      <button class="side-tab is-active" data-panel-tab="chat">Chat</button>
-      <button class="side-tab" data-panel-tab="people">People <span id="people-count" class="count-badge">1</span></button>
-      <button class="side-panel-close" id="side-panel-close" aria-label="Close panel">✕</button>
-    </div>
+  // ---------------- Read join params from the URL ----------------
+  const params = new URLSearchParams(window.location.search);
+  const roomId = (params.get('room') || '').trim();
+  const displayName = (params.get('name') || '').trim() || 'Guest';
+  let wantAudio = params.get('audio') !== '0';
+  let wantVideo = params.get('video') !== '0';
 
-    <div class="side-panel-body" data-panel-body="chat">
-      <div id="chat-log" class="chat-log" aria-live="polite"></div>
-      <form id="chat-form" class="chat-form">
-        <input id="chat-input" type="text" maxlength="1000" placeholder="Message everyone…" autocomplete="off" />
-        <button type="submit" class="chat-send" aria-label="Send message">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-        </button>
-      </form>
-    </div>
+  if (!roomId) {
+    // No session to join — send them back to pick one.
+    window.location.href = '/';
+    return;
+  }
 
-    <div class="side-panel-body" data-panel-body="people" hidden>
-      <div class="people-host-actions">
-        <button id="btn-mute-all" class="btn btn-ghost btn-sm" hidden>Mute all</button>
-      </div>
-      <ul id="people-list" class="people-list"></ul>
-    </div>
-  </aside>
+  let socket = null;
+  let rtc = null;
+  let selfId = null;
+  let isHost = false;
+  let callStartedAt = null;
+  let timerInterval = null;
+  let isScreenSharing = false;
 
-  <footer class="control-bar">
-    <div class="control-bar-inner">
-      <button id="ctl-mic" class="ctl-btn is-on" type="button" aria-pressed="true">
-        <svg class="icon-on" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
-        <svg class="icon-off" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M19 10v2a7 7 0 0 1-9.7 6.44"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
-        <span class="ctl-label">Mic</span>
-      </button>
+  // id -> { name, isHost, audio, video, screenSharing, tileEl }
+  const participants = new Map();
 
-      <button id="ctl-cam" class="ctl-btn is-on" type="button" aria-pressed="true">
-        <svg class="icon-on" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
-        <svg class="icon-off" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 16v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/><path d="M23 7l-7 5 7 5V7z"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-        <span class="ctl-label">Camera</span>
-      </button>
+  // ---------------- Toast ----------------
+  let toastTimer = null;
+  function showToast(message, duration = 2600) {
+    els.toast.textContent = message;
+    els.toast.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { els.toast.hidden = true; }, duration);
+  }
 
-      <button id="ctl-screen" class="ctl-btn" type="button" aria-pressed="false">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-        <span class="ctl-label">Share</span>
-      </button>
+  // ---------------- Join on load ----------------
+  async function init() {
+    els.roomCodeText.textContent = roomId;
 
-      <button id="ctl-chat" class="ctl-btn" type="button" aria-pressed="false">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
-        <span class="ctl-label">Chat</span>
-      </button>
+    socket = io();
+    rtc = new ApexRTC(socket);
 
-      <button id="ctl-people" class="ctl-btn" type="button" aria-pressed="false">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-        <span class="ctl-label">People</span>
-      </button>
+    rtc.onRemoteStream = (peerId, stream) => attachStreamToTile(peerId, stream);
+    rtc.onRemoteSpeaking = (peerId, speaking) => {
+      const p = participants.get(peerId);
+      if (p && p.tileEl) p.tileEl.classList.toggle('is-speaking', speaking);
+    };
+    rtc.onPeerGone = (peerId) => removeTile(peerId);
 
-      <button id="ctl-leave" class="ctl-btn ctl-leave" type="button">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a1 1 0 0 1 1.11-.21 12.35 12.35 0 0 0 3.81 1.21 1 1 0 0 1 .86 1v3.5a1 1 0 0 1-1 1A18.36 18.36 0 0 1 3 3a1 1 0 0 1 1-1h3.53a1 1 0 0 1 1 .86 12.35 12.35 0 0 0 1.2 3.81 1 1 0 0 1-.21 1.11z"/><line x1="22" y1="2" x2="2" y2="22"/></svg>
-        <span class="ctl-label">Leave</span>
-      </button>
-    </div>
-  </footer>
-</main>
+    try {
+      await rtc.getLocalMedia({ audio: wantAudio, video: wantVideo });
+    } catch (err) {
+      showToast("Couldn't access camera or mic — joining without them.");
+      wantAudio = false;
+      wantVideo = false;
+    }
 
-<div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
+    bindSocketEvents();
+    socket.emit('join-room', { roomId, displayName, audio: wantAudio, video: wantVideo });
 
-<template id="tile-template">
-  <div class="tile" data-tile>
-    <video class="tile-video" autoplay playsinline></video>
-    <div class="tile-placeholder">
-      <span class="tile-avatar"></span>
-    </div>
-    <div class="tile-meta">
-      <span class="tile-name"></span>
-      <span class="tile-mic-off" title="Microphone off">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M19 10v2a7 7 0 0 1-9.7 6.44"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
-      </span>
-      <span class="tile-host-flag" title="Host">★</span>
-    </div>
-  </div>
-</template>
+    setCtlState(els.ctlMic, wantAudio);
+    setCtlState(els.ctlCam, wantVideo);
+    startTimer();
 
-<script src="/socket.io/socket.io.js"></script>
-<script src="/js/webrtc.js"></script>
-<script src="/js/call.js"></script>
-</body>
-</html>
+    if (rtc.localStream) {
+      rtc.watchLocalSpeaking((speaking) => {
+        const p = participants.get(selfId);
+        if (p && p.tileEl) p.tileEl.classList.toggle('is-speaking', speaking);
+      });
+    }
+  }
+
+  // ---------------- Socket events ----------------
+  function bindSocketEvents() {
+    socket.on('join-error', ({ message }) => {
+      showToast(message);
+      setTimeout(() => { window.location.href = '/'; }, 1500);
+    });
+
+    socket.on('joined', ({ selfId: id, isHost: host, participants: roster }) => {
+      selfId = id;
+      isHost = host;
+      els.btnMuteAll.hidden = !isHost;
+
+      upsertParticipant(selfId, {
+        name: displayName,
+        isHost,
+        audio: wantAudio,
+        video: wantVideo,
+        screenSharing: false,
+      });
+      ensureTile(selfId, true);
+      if (rtc.localStream) attachStreamToTile(selfId, rtc.localStream);
+
+      roster.forEach((p) => {
+        upsertParticipant(p.id, p);
+        ensureTile(p.id, false);
+        rtc.callPeer(p.id);
+      });
+
+      renderPeopleList();
+    });
+
+    socket.on('user-joined', (p) => {
+      upsertParticipant(p.id, p);
+      ensureTile(p.id, false);
+      renderPeopleList();
+      showToast(`${p.name} joined`);
+    });
+
+    socket.on('user-left', ({ id }) => {
+      const p = participants.get(id);
+      if (p) showToast(`${p.name} left`);
+      rtc.removePeer(id);
+      removeTile(id);
+      participants.delete(id);
+      renderPeopleList();
+    });
+
+    socket.on('participant-updated', (p) => {
+      upsertParticipant(p.id, p);
+      updateTileMeta(p.id);
+      renderPeopleList();
+    });
+
+    socket.on('host-changed', ({ id }) => {
+      isHost = id === selfId;
+      els.btnMuteAll.hidden = !isHost;
+      if (isHost) showToast("You're the host now");
+      renderPeopleList();
+    });
+
+    socket.on('force-mute', ({ muted }) => {
+      wantAudio = !muted;
+      rtc.setLocalAudioEnabled(wantAudio);
+      setCtlState(els.ctlMic, wantAudio);
+      showToast(muted ? 'The host muted you' : 'The host unmuted you');
+    });
+
+    socket.on('chat-message', ({ from, name, text, ts }) => {
+      appendChatMessage({ name, text, ts, isSelf: from === selfId });
+    });
+  }
+
+  // ---------------- Participants & tiles ----------------
+  function upsertParticipant(id, data) {
+    const existing = participants.get(id) || {};
+    participants.set(id, { ...existing, ...data });
+  }
+
+  function ensureTile(id, isSelf) {
+    const p = participants.get(id);
+    if (!p || p.tileEl) return p && p.tileEl;
+
+    const node = els.tileTemplate.content.firstElementChild.cloneNode(true);
+    node.dataset.peerId = id;
+    node.classList.toggle('is-self', isSelf);
+    node.querySelector('.tile-name').textContent = isSelf ? `${p.name} (You)` : p.name;
+    if (isSelf) node.querySelector('.tile-video').muted = true;
+
+    els.videoGrid.appendChild(node);
+    p.tileEl = node;
+    updateTileMeta(id);
+    return node;
+  }
+
+  function attachStreamToTile(id, stream) {
+    const p = participants.get(id);
+    if (!p) return;
+    const tile = p.tileEl || ensureTile(id, id === selfId);
+    const videoEl = tile.querySelector('.tile-video');
+    videoEl.srcObject = stream;
+    const hasLiveVideo = stream.getVideoTracks().some((t) => t.enabled && t.readyState === 'live');
+    tile.classList.toggle('no-video', !hasLiveVideo);
+  }
+
+  function updateTileMeta(id) {
+    const p = participants.get(id);
+    if (!p || !p.tileEl) return;
+    p.tileEl.classList.toggle('is-host', !!p.isHost);
+    p.tileEl.classList.toggle('is-muted', p.audio === false);
+    p.tileEl.classList.toggle('no-video', p.video === false);
+  }
+
+  function removeTile(id) {
+    const p = participants.get(id);
+    if (p && p.tileEl) p.tileEl.remove();
+  }
+
+  // ---------------- People panel ----------------
+  function renderPeopleList() {
+    els.peopleList.innerHTML = '';
+    els.peopleCount.textContent = String(participants.size);
+
+    participants.forEach((p, id) => {
+      const li = document.createElement('li');
+      li.className = 'people-row';
+
+      const avatar = document.createElement('span');
+      avatar.className = 'people-avatar';
+
+      const name = document.createElement('span');
+      name.className = 'people-name';
+      name.textContent = id === selfId ? `${p.name} (You)` : p.name;
+
+      li.append(avatar, name);
+
+      if (p.isHost) {
+        const tag = document.createElement('span');
+        tag.className = 'people-tag';
+        tag.textContent = 'HOST';
+        li.appendChild(tag);
+      }
+
+      if (isHost && id !== selfId) {
+        const muteBtn = document.createElement('button');
+        muteBtn.className = 'people-mute-btn';
+        muteBtn.classList.toggle('is-muted', p.audio === false);
+        muteBtn.title = p.audio === false ? 'Unmute' : 'Mute';
+        muteBtn.innerHTML = p.audio === false
+          ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M19 10v2a7 7 0 0 1-9.7 6.44"/><line x1="12" y1="19" x2="12" y2="23"/></svg>'
+          : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>';
+        muteBtn.addEventListener('click', () => {
+          socket.emit('host-set-mute', { targetId: id, muted: p.audio !== false });
+        });
+        li.appendChild(muteBtn);
+      }
+
+      els.peopleList.appendChild(li);
+    });
+  }
+
+  els.btnMuteAll.addEventListener('click', () => {
+    socket.emit('host-mute-all');
+    showToast('Muted everyone');
+  });
+
+  // ---------------- Chat ----------------
+  function appendChatMessage({ name, text, ts, isSelf }) {
+    const row = document.createElement('div');
+    row.className = 'chat-msg' + (isSelf ? ' is-self' : '');
+
+    const head = document.createElement('div');
+    head.className = 'chat-msg-head';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'chat-msg-name';
+    nameEl.textContent = isSelf ? 'You' : name;
+    const timeEl = document.createElement('span');
+    timeEl.className = 'chat-msg-time';
+    timeEl.textContent = new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    head.append(nameEl, timeEl);
+
+    const textEl = document.createElement('div');
+    textEl.className = 'chat-msg-text';
+    textEl.textContent = text;
+
+    row.append(head, textEl);
+    els.chatLog.appendChild(row);
+    els.chatLog.scrollTop = els.chatLog.scrollHeight;
+  }
+
+  els.chatForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = els.chatInput.value.trim();
+    if (!text) return;
+    socket.emit('chat-message', { text });
+    els.chatInput.value = '';
+  });
+
+  // ---------------- Side panel open/close ----------------
+  function openSidePanel(which) {
+    els.sidePanel.hidden = false;
+    els.sideTabs.forEach((t) => t.classList.toggle('is-active', t.dataset.panelTab === which));
+    els.sideBodies.forEach((b) => { b.hidden = b.dataset.panelBody !== which; });
+    setCtlState(els.ctlChat, which === 'chat');
+    setCtlState(els.ctlPeople, which === 'people');
+  }
+  function closeSidePanel() {
+    els.sidePanel.hidden = true;
+    setCtlState(els.ctlChat, false);
+    setCtlState(els.ctlPeople, false);
+  }
+
+  els.sideTabs.forEach((tab) => {
+    tab.addEventListener('click', () => openSidePanel(tab.dataset.panelTab));
+  });
+  els.sidePanelClose.addEventListener('click', closeSidePanel);
+
+  els.ctlChat.addEventListener('click', () => {
+    const isOpen = !els.sidePanel.hidden && !els.sidePanel.querySelector('[data-panel-body="chat"]').hidden;
+    isOpen ? closeSidePanel() : openSidePanel('chat');
+  });
+  els.ctlPeople.addEventListener('click', () => {
+    const isOpen = !els.sidePanel.hidden && !els.sidePanel.querySelector('[data-panel-body="people"]').hidden;
+    isOpen ? closeSidePanel() : openSidePanel('people');
+  });
+
+  // ---------------- Mic / camera / screen-share controls ----------------
+  function setCtlState(btn, on) {
+    btn.classList.toggle('is-on', on);
+    btn.setAttribute('aria-pressed', String(on));
+  }
+
+  els.ctlMic.addEventListener('click', () => {
+    wantAudio = !wantAudio;
+    rtc.setLocalAudioEnabled(wantAudio);
+    setCtlState(els.ctlMic, wantAudio);
+    socket.emit('media-state', { audio: wantAudio });
+  });
+
+  els.ctlCam.addEventListener('click', () => {
+    wantVideo = !wantVideo;
+    rtc.setLocalVideoEnabled(wantVideo);
+    setCtlState(els.ctlCam, wantVideo);
+    socket.emit('media-state', { video: wantVideo });
+    const p = participants.get(selfId);
+    if (p && p.tileEl) p.tileEl.classList.toggle('no-video', !wantVideo);
+  });
+
+  els.ctlScreen.addEventListener('click', async () => {
+    try {
+      if (!isScreenSharing) {
+        const stream = await rtc.startScreenShare();
+        isScreenSharing = true;
+        setCtlState(els.ctlScreen, true);
+        attachStreamToTile(selfId, stream);
+        socket.emit('media-state', { screenSharing: true });
+        stream.getVideoTracks()[0].addEventListener('ended', () => {
+          if (isScreenSharing) els.ctlScreen.click();
+        });
+      } else {
+        await rtc.stopScreenShare();
+        isScreenSharing = false;
+        setCtlState(els.ctlScreen, false);
+        if (rtc.localStream) attachStreamToTile(selfId, rtc.localStream);
+        socket.emit('media-state', { screenSharing: false });
+      }
+    } catch (err) {
+      // User cancelled the "choose what to share" dialog — no-op.
+    }
+  });
+
+  // ---------------- Room code copy ----------------
+  els.roomCodeChip.addEventListener('click', () => {
+    navigator.clipboard.writeText(els.roomCodeText.textContent).then(() => {
+      showToast('Session code copied');
+    }).catch(() => {
+      showToast(`Session code: ${els.roomCodeText.textContent}`);
+    });
+  });
+
+  // ---------------- Call timer ----------------
+  function startTimer() {
+    callStartedAt = Date.now();
+    timerInterval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - callStartedAt) / 1000);
+      const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+      const s = String(elapsed % 60).padStart(2, '0');
+      els.callTimer.textContent = `${m}:${s}`;
+    }, 1000);
+  }
+
+  // ---------------- Leaving: a real navigation back to the landing page ----------------
+  els.ctlLeave.addEventListener('click', () => {
+    if (socket) socket.emit('leave-room');
+    window.location.href = '/';
+  });
+
+  window.addEventListener('beforeunload', () => {
+    if (socket) socket.emit('leave-room');
+  });
+
+  init();
+})();
