@@ -1,0 +1,16 @@
+{
+  "name": "apex-sessions",
+  "version": "1.0.0",
+  "description": "Apex Sessions — video, audio, and screen-share calls with live chat and host controls.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
